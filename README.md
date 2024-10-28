@@ -162,6 +162,7 @@
 - reportlab==4.2.5
 
 国内加速源：
+```
 tee ~/.pip/pip.conf <<-'EOF'
 [global]
 timeout=600
@@ -169,6 +170,7 @@ index-url = http://mirrors.aliyun.com/pypi/simple/
 [install]
 trusted-host = mirrors.aliyun.com
 EOF
+```
 
 详细的依赖列表请查看 `requirements.txt` 文件。
 
