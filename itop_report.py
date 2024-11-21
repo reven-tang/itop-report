@@ -18,6 +18,8 @@ from reportlab.graphics.charts.piecharts import Pie
 from reportlab.graphics.charts.legends import Legend
 from reportlab.lib.colors import HexColor
 from reportlab.graphics.shapes import String
+from reportlab.graphics.charts.lineplots import LinePlot
+from reportlab.graphics.charts.textlabels import Label
 import os
 
 # 连接到iTop数据库
@@ -119,23 +121,46 @@ def get_change_stats(engine, start_date, end_date):
 def get_team_stats(engine, start_date, end_date):
     query = """
     SELECT 
+        DATE_FORMAT(subquery.start_date, '%%Y-%%m') AS '月份',
         c.name AS '团队',
-        ticket_type AS '工单类型',
+        subquery.ticket_type AS '工单类型',
         COUNT(*) AS '工单数量',
+        SUM(CASE WHEN subquery.status NOT IN ('closed', 'new', 'resolved') THEN 1 ELSE 0 END) AS '未解决',
+        SUM(CASE WHEN (subquery.tto_75_passed = 1 OR subquery.ttr_75_passed = 1) THEN 1 ELSE 0 END) AS '超时工单',
+        CONCAT(
+            ROUND(
+                (COUNT(*) - SUM(CASE WHEN subquery.status NOT IN ('closed', 'new', 'resolved') THEN 1 ELSE 0 END)) * 100.0 / 
+                NULLIF(COUNT(*), 0),
+                2
+            ),
+            '%%'
+        ) AS '工单解决率',
+        CONCAT(
+            ROUND(
+                (COUNT(*) - SUM(CASE WHEN (subquery.tto_75_passed = 1 OR subquery.ttr_75_passed = 1) THEN 1 ELSE 0 END)) * 100.0 / 
+                NULLIF(COUNT(*), 0),
+                2
+            ),
+            '%%'
+        ) AS '工单及时率',
         CASE 
-            WHEN ticket_type = '变更' THEN 'N/A'
-            ELSE ROUND(AVG(response_time) / 60, 2)
+            WHEN subquery.ticket_type = '变更' THEN 'N/A'
+            ELSE ROUND(AVG(subquery.response_time) / 60, 2)
         END AS '平均响应时长(分钟)',
-        ROUND(AVG(resolution_time) / 60, 2) AS '平均解决时长(分钟)',
+        ROUND(AVG(subquery.resolution_time) / 60, 2) AS '平均解决时长(分钟)',
         CASE 
-            WHEN ticket_type = '变更' THEN 'N/A'
-            ELSE ROUND(MAX(response_time) / 60, 2)
+            WHEN subquery.ticket_type = '变更' THEN 'N/A'
+            ELSE ROUND(MAX(subquery.response_time) / 60, 2)
         END AS '最大响应时长(分钟)',
-        ROUND(MAX(resolution_time) / 60, 2) AS '最大解决时长(分钟)'
+        ROUND(MAX(subquery.resolution_time) / 60, 2) AS '最大解决时长(分钟)'
     FROM (
         SELECT 
             t.team_id,
+            t.start_date,
             '服务请求' AS ticket_type,
+            tr.status,
+            tr.tto_75_passed,
+            tr.ttr_75_passed,
             TIMESTAMPDIFF(SECOND, tr.tto_started, tr.tto_stopped) AS response_time,
             TIMESTAMPDIFF(SECOND, tr.tto_stopped, tr.ttr_stopped) AS resolution_time
         FROM ticket t 
@@ -148,7 +173,11 @@ def get_team_stats(engine, start_date, end_date):
         
         SELECT 
             t.team_id,
+            t.start_date,
             '事件' AS ticket_type,
+            ti.status,
+            ti.tto_75_passed,
+            ti.ttr_75_passed,
             TIMESTAMPDIFF(SECOND, ti.tto_started, ti.tto_stopped) AS response_time,
             TIMESTAMPDIFF(SECOND, ti.tto_stopped, ti.ttr_stopped) AS resolution_time
         FROM ticket t 
@@ -161,7 +190,11 @@ def get_team_stats(engine, start_date, end_date):
         
         SELECT 
             t.team_id,
+            t.start_date,
             '变更' AS ticket_type,
+            c2.status,
+            0 AS tto_75_passed,  -- 变更工单没有响应时间要求
+            0 AS ttr_75_passed,  -- 变更工单暂不考虑解决时间超时
             NULL AS response_time,
             TIMESTAMPDIFF(SECOND, t.start_date, t.end_date) AS resolution_time
         FROM ticket t 
@@ -172,9 +205,9 @@ def get_team_stats(engine, start_date, end_date):
     ) AS subquery
     JOIN contact c ON subquery.team_id = c.id 
     WHERE c.finalclass = 'Team'
-    GROUP BY c.name, ticket_type
+    GROUP BY DATE_FORMAT(subquery.start_date, '%%Y-%%m'), c.name, subquery.ticket_type
     HAVING COUNT(*) > 0
-    ORDER BY ticket_type desc, c.name
+    ORDER BY DATE_FORMAT(subquery.start_date, '%%Y-%%m') DESC, subquery.ticket_type DESC, c.name
     """
     
     return execute_query(engine, query, {'start_date': start_date, 'end_date': end_date})
@@ -189,9 +222,28 @@ def get_person_stats(engine, start_date, end_date):
     )
 
     SELECT 
+        DATE_FORMAT(start_date, '%%Y-%%m') AS '月份',
         ai.agent_name AS '办理人',
         ticket_type AS '工单类型',
         COUNT(*) AS '工单数量',
+        SUM(CASE WHEN status NOT IN ('closed', 'new', 'resolved') THEN 1 ELSE 0 END) AS '未解决',
+        SUM(CASE WHEN (tto_75_passed = 1 OR ttr_75_passed = 1) THEN 1 ELSE 0 END) AS '超时工单',
+        CONCAT(
+            ROUND(
+                (COUNT(*) - SUM(CASE WHEN status NOT IN ('closed', 'new', 'resolved') THEN 1 ELSE 0 END)) * 100.0 / 
+                NULLIF(COUNT(*), 0),
+                2
+            ),
+            '%%'
+        ) AS '工单解决率',
+        CONCAT(
+            ROUND(
+                (COUNT(*) - SUM(CASE WHEN (tto_75_passed = 1 OR ttr_75_passed = 1) THEN 1 ELSE 0 END)) * 100.0 / 
+                NULLIF(COUNT(*), 0),
+                2
+            ),
+            '%%'
+        ) AS '工单及时率',
         CASE 
             WHEN ticket_type = '变更' THEN 'N/A'
             ELSE ROUND(AVG(response_time) / 60, 2)
@@ -206,6 +258,10 @@ def get_person_stats(engine, start_date, end_date):
         SELECT 
             t.agent_id,
             '服务请求' AS ticket_type,
+            tr.status,
+            t.start_date,
+            tr.tto_75_passed,
+            tr.ttr_75_passed,
             TIMESTAMPDIFF(SECOND, tr.tto_started, tr.tto_stopped) AS response_time,
             TIMESTAMPDIFF(SECOND, tr.tto_stopped, tr.ttr_stopped) AS resolution_time
         FROM ticket_request tr
@@ -219,6 +275,10 @@ def get_person_stats(engine, start_date, end_date):
         SELECT 
             t.agent_id,
             '事件' AS ticket_type,
+            ti.status,
+            t.start_date,
+            ti.tto_75_passed,
+            ti.ttr_75_passed,
             TIMESTAMPDIFF(SECOND, ti.tto_started, ti.tto_stopped) AS response_time,
             TIMESTAMPDIFF(SECOND, ti.tto_stopped, ti.ttr_stopped) AS resolution_time
         FROM ticket_incident ti
@@ -232,6 +292,10 @@ def get_person_stats(engine, start_date, end_date):
         SELECT 
             t.agent_id,
             '变更' AS ticket_type,
+            c2.status,
+            t.start_date,
+            0 AS tto_75_passed,  -- 变更工单没有响应时间要求
+            0 AS ttr_75_passed,  -- 变更工单暂不考虑解决时间超时
             NULL AS response_time,
             TIMESTAMPDIFF(SECOND, t.start_date, t.end_date) AS resolution_time
         FROM `change` c2
@@ -241,8 +305,8 @@ def get_person_stats(engine, start_date, end_date):
             AND t.start_date < %(end_date)s
     ) AS subquery
     JOIN agent_info ai ON subquery.agent_id = ai.id
-    GROUP BY ai.agent_name, ticket_type
-    ORDER BY ticket_type desc, ai.agent_name
+    GROUP BY ai.agent_name, ticket_type, DATE_FORMAT(start_date, '%%Y-%%m')
+    ORDER BY DATE_FORMAT(start_date, '%%Y-%%m') DESC, ticket_type DESC, ai.agent_name
     """
 
     return execute_query(engine, query, {'start_date': start_date, 'end_date': end_date})
@@ -332,9 +396,9 @@ def generate_pdf(start_date, end_date, ticket_summary, user_request_stats, incid
 
     # 添加标题
     if start_date.month == end_date.month:
-        title = f"<para alignment='center'>iTop 运维服务月报 ({start_date.year}年{start_date.month}月)</para>"
+        title = f"<para alignment='center'>iTop 运维服务报表 ({start_date.year}年{start_date.month}月)</para>"
     else:
-        title = f"<para alignment='center'>iTop 运维服务月报 ({start_date.year}年{start_date.month}月至{end_date.year}年{end_date.month}月)</para>"
+        title = f"<para alignment='center'>iTop 运维服务报表 ({start_date.year}年{start_date.month}月至{end_date.year}年{end_date.month}月)</para>"
     elements.append(Paragraph(title, title_style))
     elements.append(Spacer(1, 12))
 
@@ -354,8 +418,19 @@ def generate_pdf(start_date, end_date, ticket_summary, user_request_stats, incid
         pie.width = 200
         pie.height = 200
         pie.data = data
-        pie.labels = ['' for _ in labels]  # 清空饼图上的标签
+        
+        # 直接使用标签作为饼图标签
+        pie.labels = labels
         pie.slices.strokeWidth = 0.5
+        
+        # 设置标签样式
+        pie.sideLabels = True  # 将标签放在饼图外侧
+        pie.sideLabelsOffset = 0.1  # 调整标签距离
+        pie.simpleLabels = False  # 允许自定义标签样式
+        pie.slices.fontName = 'SimKai'  # 设置标签字体为楷体
+        # 将标签替换为百分比
+        total = sum(pie.data)
+        pie.labels = ['%.1f%%' % (value/total*100) for value in pie.data]
 
         # 设置颜色
         colors = [HexColor('#00b8a9'), HexColor('#f6416c'), HexColor('#f8f3d4')]
@@ -365,7 +440,7 @@ def generate_pdf(start_date, end_date, ticket_summary, user_request_stats, incid
         drawing.add(pie)
 
         # 添加标题
-        title_label = String(200, 240, title)
+        title_label = String(200, 250, title)  # 从240上移到250
         title_label.fontName = 'SimKai'
         title_label.fontSize = 12
         title_label.textAnchor = 'middle'
@@ -402,8 +477,9 @@ def generate_pdf(start_date, end_date, ticket_summary, user_request_stats, incid
             elements.append(Paragraph(f"已解决的服务请求中，{closed:g} 个服务请求被按时关闭，占比约 {closed_percentage:.2f}%；", normal_style))
             elements.append(Paragraph(f"未解决的服务请求有 {unresolved:g} 个，占比约 {unresolved_percentage:.2f}%。", normal_style))
             
-            # 添加一行空行
-            elements.append(Spacer(1, 12)) 
+            # 添加两行空行
+            elements.append(Spacer(1, 12))
+            elements.append(Spacer(1, 12))
 
             # 添加饼图
             pie_data = [resolved, unresolved, closed]
@@ -504,7 +580,140 @@ def generate_pdf(start_date, end_date, ticket_summary, user_request_stats, incid
             for j, cell in enumerate(row):
                 team_table._cellvalues[i][j] = Paragraph(str(cell), normal_style)
         
-        elements.append(team_table)
+        elements.append(team_table)     
+        
+        # 3.1 按照工单处理团队绘制服务请求的解决率
+        # 将team_stats转换为pandas DataFrame
+        df = pd.DataFrame(team_stats)
+        
+        # 按月份和团队分组计算平均解决率和及时率
+        df['工单解决率'] = df['工单解决率'].apply(lambda x: float(str(x).rstrip('%')))
+        
+        # 检查是否跨月
+        if len(df['月份'].unique()) > 1:
+            # 仅保留服务请求数据
+            service_request_df = df[df['工单类型'] == '服务请求']
+            
+            # 如果有服务请求数据才继续绘图
+            if not service_request_df.empty:
+                # 创建折线图,设置画布大小为500x300
+                drawing = Drawing(600, 300)  # 使用页面宽度的85%作为图表宽度
+                # 创建折线图对象
+                lp = LinePlot()
+                lp.data = []
+                # 设置折线图在画布中的位置和大小
+                lp.x = 10  # 从50改为10,向左偏移40个单位
+                lp.y = 50
+                lp.height = 200
+                lp.width = 450
+                
+                # 获取所有月份和团队列表并排序
+                months = sorted(service_request_df['月份'].unique())
+                teams = sorted(service_request_df['团队'].unique())
+                
+                # 为每个团队创建一条折线
+                for i, team in enumerate(teams):
+                    # 获取当前团队的数据
+                    team_data = service_request_df[service_request_df['团队'] == team]
+                    data = []  # 存储解决率数据
+                    x_data = [] # 存储月份数据
+                    # 遍历每个月份获取数据点
+                    for j, month in enumerate(months):
+                        month_data = team_data[team_data['月份'] == month]
+                        if not month_data.empty:
+                            # 添加该月的解决率数据
+                            data.append(month_data['工单解决率'].iloc[0])
+                            # 将月份转换为202301格式
+                            x_data.append(int(month.split('-')[1]))
+                            print(x_data)
+                    # 只有当有数据时才添加到图表中
+                    if data and x_data:  
+                        lp.data.append(list(zip(x_data, data)))
+                
+                # 配置x轴,使用实际的月份值作为刻度
+                unique_months = sorted(set([x for team_data in lp.data for x,_ in team_data]))
+                lp.xValueAxis.valueSteps = unique_months
+                lp.xValueAxis.labels = [Label() for _ in unique_months]
+                # 设置x轴标签样式
+                for i, label in enumerate(lp.xValueAxis.labels):
+                    # 找到对应的完整月份字符串
+                    month_num = unique_months[i]
+                    month_str = next(m for m in months if int(m.split('-')[1]) == month_num)
+                    label._text = month_str
+                    label.fontName = 'SimKai'
+                    label.fontSize = 10
+                    label.angle = 0  # 标签水平显示
+                    label.dx = 0   # x方向偏移量向左20个单位
+                    label.dy = -20   # y方向偏移量(向下)
+                
+                # 配置y轴范围和刻度
+                lp.yValueAxis.valueMin = 0
+                lp.yValueAxis.valueMax = 100
+                lp.yValueAxis.valueStep = 10
+                # 添加横向网格线
+                lp.yValueAxis.visibleGrid = True  # 显示网格线
+                lp.yValueAxis.gridStrokeColor = colors.Color(0.9, 0.9, 0.9)  # 设置网格线颜色为更浅的灰色
+                lp.yValueAxis.gridStrokeWidth = 0.5  # 设置网格线宽度
+                
+                # 创建图例对象并设置样式
+                legend = Legend()  # 实例化一个Legend对象用于显示图例
+                
+                # 设置图例位置和大小，使其居中显示在图表上方
+                legend.x = lp.x + (lp.width / 2)  # 设置图例的x坐标为图表宽度的一半,使其水平居中
+                legend.y = lp.y + lp.height + 30  # 设置图例的y坐标,使其位于图表上方30个单位处
+                legend.dx = 8  # 设置图例的x方向偏移量为8
+                legend.dy = 8  # 设置图例的y方向偏移量为8
+                
+                # 设置图例文字样式
+                legend.fontName = 'SimKai'  # 设置图例字体为楷体
+                legend.fontSize = 9  # 设置图例字体大小为10
+                legend.boxAnchor = 'n'  # 设置图例框的锚点位置为north(北)
+                legend.columnMaximum = 1  # 设置图例最大列数为1
+                
+                # 设置图例边框样式
+                legend.strokeWidth = 0.5  # 设置图例边框线宽为0.5
+                legend.strokeColor = colors.black  # 设置图例边框颜色为黑色
+                
+                # 设置图例内部布局
+                legend.deltax = 75  # 设置图例项之间的水平间距为75
+                legend.deltay = 10  # 设置图例项之间的垂直间距为10
+                legend.autoXPadding = 5  # 设置图例自动水平内边距为5
+                legend.yGap = 0  # 设置图例垂直间隙为0
+                legend.dxTextSpace = 5  # 设置图例文本与标记之间的间距为5
+                
+                # 设置图例分隔线
+                legend.dividerLines = 1|2|4  # 设置图例分隔线的显示方式(上|下|中间)
+                legend.dividerOffsY = 4.5  # 设置分隔线的垂直偏移量为4.5
+                legend.subCols.rpad = 30  # 设置子列的右侧内边距为30
+                
+                # 为每个有数据的团队添加图例项
+                legend.colorNamePairs = []
+                for i, team in enumerate(teams):
+                    if not service_request_df[service_request_df['团队'] == team].empty:
+                        # 第一个团队用红色,其他用蓝色
+                        color = colors.red if i == 0 else colors.blue
+                        legend.colorNamePairs.append((color, team))
+                
+                # 只有当有图例数据时才添加图表和图例
+                if legend.colorNamePairs:  
+                    drawing.add(lp)
+                    drawing.add(legend)
+                    
+                    # 在每个数据点上添加数值标签
+                    for i, team_data in enumerate(lp.data):
+                        for x, y in team_data:
+                            label = String(lp.x + (x - min(unique_months)) * (lp.width / (max(unique_months) - min(unique_months))) + 12,  # 向右偏移12个单位
+                                         lp.y + y * (lp.height / 100) + 5,  # 向上偏移5个单位
+                                         '%.1f%%' % y,  # 显示一位小数
+                                         fontSize=9,
+                                         fontName='SimKai',
+                                         textAnchor='middle')
+                            drawing.add(label)
+                    
+                    # 添加图表标题和图表到PDF
+                    elements.append(Paragraph("各团队服务请求月度解决率趋势", subtitle_style))
+                    elements.append(drawing)
+                    elements.append(Spacer(1, 12))
     else:
         elements.append(Paragraph("本周期内没有要处理的工单", normal_style))
     elements.append(Spacer(1, 12))
@@ -725,7 +934,12 @@ def main():
                      """)
 
             # 饼图：服务请求状态
-            fig = px.pie(names=['已解决', '未解决', '已关闭'], values=[resolved, unresolved, closed], title="服务请求状态分布", color_discrete_sequence=['#00b8a9', '#f6416c', '#f8f3d4'])
+            fig = px.pie(names=['已解决', '未解决', '已关闭'], 
+                         values=[resolved, unresolved, closed], 
+                         title="服务请求状态分布", 
+                         color_discrete_sequence=['#00b8a9', '#f6416c', '#f8f3d4'])
+            fig.update_traces(textposition='inside', 
+                            textinfo='label+percent')
             fig.update_layout(title_x=0.35)  # 将标题居中显示
             st.plotly_chart(fig)
         else:
@@ -753,7 +967,12 @@ def main():
                      """)
 
             # 饼图：事件状态
-            fig = px.pie(names=['已解决', '未解决', '已关闭'], values=[resolved, unresolved, closed], title="事件状态分布", color_discrete_sequence=['#00b8a9', '#f6416c', '#f8f3d4'])
+            fig = px.pie(names=['已解决', '未解决', '已关闭'], 
+                         values=[resolved, unresolved, closed], 
+                         title="事件状态分布", 
+                         color_discrete_sequence=['#00b8a9', '#f6416c', '#f8f3d4'])
+            fig.update_traces(textposition='inside', 
+                            textinfo='label+percent')
             fig.update_layout(title_x=0.35)  # 将标题居中显示
             st.plotly_chart(fig)
         else:
@@ -778,7 +997,12 @@ def main():
                      """)
 
             # 饼图：变更状态
-            fig = px.pie(names=['已解决', '未解决'], values=[resolved, total-resolved], title="变更状态分布", color_discrete_sequence=['#00b8a9', '#f6416c'])
+            fig = px.pie(names=['已解决', '未解决'], 
+                        values=[resolved, total-resolved], 
+                        title="变更状态分布", 
+                        color_discrete_sequence=['#00b8a9', '#f6416c'])
+            fig.update_traces(textposition='inside', 
+                            textinfo='label+percent')
             fig.update_layout(title_x=0.35)  # 将标题居中显示
             st.plotly_chart(fig)
         else:
@@ -789,6 +1013,55 @@ def main():
     # 3. 按照工单处理团队统计
     st.write("#### 2. 按照工单处理团队统计，具体如下")
     st.dataframe(team_stats, use_container_width=True)
+
+    # 3.1 按照工单处理团队绘制服务请求的解决率
+    # 将team_stats转换为pandas DataFrame
+    df = pd.DataFrame(team_stats)
+    
+    # 按月份和团队分组计算平均解决率和及时率
+    df['工单解决率'] = df['工单解决率'].apply(lambda x: float(str(x).rstrip('%')))
+    
+    # 检查是否跨月
+    if len(df['月份'].unique()) > 1:
+        # 仅保留服务请求数据
+        service_request_df = df[df['工单类型'] == '服务请求']
+        # 创建解决率曲线图
+        fig1 = px.line(service_request_df, 
+                      x='月份', 
+                      y='工单解决率',
+                      color='团队',
+                      markers=True,
+                      text='工单解决率',  # 添加数值标签
+                      title='各团队服务请求月度解决率趋势')
+        
+        # 配置数值标签的显示
+        fig1.update_traces(
+            textposition="top center",  # 将数值显示在点的上方居中
+            texttemplate='%{text:.1f}%'  # 显示格式:保留1位小数并加上%号
+        )
+        
+        fig1.update_layout(
+            title_x=0.35,
+            title_y=0.95, # 将标题向上移动
+            xaxis_title='月份',
+            yaxis_title='解决率(%)',
+            yaxis=dict(range=[0, 110]),
+            xaxis=dict(
+                type='category',
+                categoryorder='category ascending'
+            ),
+            margin=dict(t=100), # 增加顶部边距
+            legend=dict(
+                orientation="h",  # 水平方向
+                yanchor="bottom",
+                y=1.05,  # 调整图例位置,与标题保持10px间距
+                xanchor="center",
+                x=0.5,  # 图例水平居中
+                itemwidth=30,  # 设置图例项的宽度,使团队名称显示在一行
+                title=None  # 取消图例标题
+            )
+        )
+        st.plotly_chart(fig1)
 
     # 4. 按照工程师统计
     st.write("#### 3. 按照工单处理工程师统计，具体如下")
